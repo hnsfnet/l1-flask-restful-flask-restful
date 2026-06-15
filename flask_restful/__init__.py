@@ -96,13 +96,19 @@ class Api(object):
     :param errors: A dictionary to define a custom response for each
         exception or error raised during a request
     :type errors: dict
+    :param error_formatter: A callable to customize the error response
+        payload. It receives ``(data, code, headers)`` and must return
+        either a new data dict (code and headers are kept as-is), or a
+        ``(data, code, headers)`` tuple to override all three. When not
+        provided, the default error response is unchanged.
+    :type error_formatter: callable
 
     """
 
     def __init__(self, app=None, prefix='',
                  default_mediatype='application/json', decorators=None,
                  catch_all_404s=False, serve_challenge_on_401=False,
-                 url_part_order='bae', errors=None):
+                 url_part_order='bae', errors=None, error_formatter=None):
         self.representations = OrderedDict(DEFAULT_REPRESENTATIONS)
         self.urls = {}
         self.prefix = prefix
@@ -112,6 +118,7 @@ class Api(object):
         self.serve_challenge_on_401 = serve_challenge_on_401
         self.url_part_order = url_part_order
         self.errors = errors or {}
+        self.error_formatter = error_formatter
         self.blueprint_setup = None
         self.endpoints = set()
         self.resources = []
@@ -350,6 +357,18 @@ class Api(object):
             custom_data = self.errors.get(error_cls_name, {})
             code = custom_data.get('status', 500)
             data.update(custom_data)
+
+        # Apply the user-supplied error formatter, if any.  The formatter
+        # may return either a plain dict (data only) or a 3-tuple
+        # (data, code, headers).  If the response has been pre-built by
+        # the HTTPException (e.response is not None), this code path is
+        # never reached, so the formatter cannot interfere with that case.
+        if self.error_formatter is not None:
+            formatted = self.error_formatter(data, code, headers)
+            if isinstance(formatted, tuple):
+                data, code, headers = formatted
+            else:
+                data = formatted
 
         if code == 406 and self.default_mediatype is None:
             # if we are handling NotAcceptable (406), make sure that
