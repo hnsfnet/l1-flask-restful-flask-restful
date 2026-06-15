@@ -1089,6 +1089,165 @@ class APITestCase(unittest.TestCase):
         assert r.get() == 'get test'
         assert r.post() == 'post test'
 
+    def test_error_response_formatter_not_set_default_behavior(self):
+        """When error_response_formatter is not configured, behavior is unchanged."""
+        app = Flask(__name__)
+        api = flask_restful.Api(app)
+
+        with app.test_request_context("/foo"):
+            resp = api.handle_error(BadRequest())
+            self.assertEqual(resp.status_code, 400)
+            self.assertEqual(json.loads(resp.data.decode()), {'message': BadRequest.description})
+
+    def test_error_response_formatter_wraps_http_exception(self):
+        """Formatter wraps HTTPException error data in a custom envelope."""
+        def envelope(data, code, headers):
+            return {'error': data, 'status': code, 'success': False}
+
+        app = Flask(__name__)
+        api = flask_restful.Api(app, error_response_formatter=envelope)
+
+        with app.test_request_context("/foo"):
+            resp = api.handle_error(BadRequest())
+            self.assertEqual(resp.status_code, 400)
+            body = json.loads(resp.data.decode())
+            self.assertFalse(body['success'])
+            self.assertEqual(body['status'], 400)
+            self.assertIn('message', body['error'])
+
+    def test_error_response_formatter_with_500(self):
+        """Formatter is applied to internal server errors (non-HTTP exceptions)."""
+        def envelope(data, code, headers):
+            return {'error': data, 'status': code}
+
+        app = Flask(__name__)
+        api = flask_restful.Api(app, error_response_formatter=envelope)
+
+        with app.test_request_context("/foo"):
+            resp = api.handle_error(Exception())
+            self.assertEqual(resp.status_code, 500)
+            body = json.loads(resp.data.decode())
+            self.assertEqual(body['status'], 500)
+            self.assertIn('message', body['error'])
+
+    def test_error_response_formatter_with_401_challenge(self):
+        """Formatter is applied AND the 401 WWW-Authenticate challenge is still set."""
+        def envelope(data, code, headers):
+            return {'error': data, 'code': code}
+
+        app = Flask(__name__)
+        api = flask_restful.Api(app, serve_challenge_on_401=True,
+                                error_response_formatter=envelope)
+
+        with app.test_request_context("/foo"):
+            resp = api.handle_error(Unauthorized())
+            self.assertEqual(resp.status_code, 401)
+            self.assertIn('WWW-Authenticate', resp.headers)
+            body = json.loads(resp.data.decode())
+            self.assertEqual(body['code'], 401)
+            self.assertIn('message', body['error'])
+
+    def test_error_response_formatter_with_404(self):
+        """Formatter works on 404 errors."""
+        def envelope(data, code, headers):
+            return {'error': data, 'code': code}
+
+        app = Flask(__name__)
+        api = flask_restful.Api(app, error_response_formatter=envelope)
+
+        with app.test_request_context("/foo"):
+            resp = api.handle_error(NotFound())
+            self.assertEqual(resp.status_code, 404)
+            body = json.loads(resp.data.decode())
+            self.assertEqual(body['code'], 404)
+
+    def test_error_response_formatter_with_abort_data(self):
+        """Formatter sees data attached by flask_restful.abort()."""
+        def envelope(data, code, headers):
+            return {'error': data, 'code': code}
+
+        app = Flask(__name__)
+        api = flask_restful.Api(app, error_response_formatter=envelope)
+
+        class AbortResource(flask_restful.Resource):
+            def get(self):
+                flask_restful.abort(422, message="validation failed", errors=["bad field"])
+
+        api.add_resource(AbortResource, '/test')
+        client = app.test_client()
+        resp = client.get('/test')
+        self.assertEqual(resp.status_code, 422)
+        body = json.loads(resp.data.decode())
+        self.assertEqual(body['code'], 422)
+        self.assertEqual(body['error']['message'], 'validation failed')
+
+    def test_error_response_formatter_with_custom_errors_dict(self):
+        """Formatter works together with the errors dict."""
+        def envelope(data, code, headers):
+            return {'error': data, 'code': code}
+
+        errors = {'BadMojoError': {'status': 409, 'message': 'go away'}}
+        app = Flask(__name__)
+        api = flask_restful.Api(app, errors=errors, error_response_formatter=envelope)
+        api.add_resource(HelloBomb, '/bomb')
+
+        client = app.test_client()
+        resp = client.get('/bomb')
+        self.assertEqual(resp.status_code, 409)
+        body = json.loads(resp.data.decode())
+        self.assertEqual(body['code'], 409)
+        self.assertEqual(body['error']['message'], 'go away')
+
+    def test_error_response_formatter_mediatype_negotiation(self):
+        """Formatter output is still subject to media type negotiation."""
+        from flask import make_response as flask_make_response
+
+        def xml_output(data, code, headers=None):
+            resp = flask_make_response('<error/>', code)
+            resp.headers.extend(headers or {})
+            return resp
+
+        def envelope(data, code, headers):
+            return {'error': data, 'code': code}
+
+        app = Flask(__name__)
+        api = flask_restful.Api(app, error_response_formatter=envelope)
+        api.representations['application/xml'] = xml_output
+
+        class Fail(flask_restful.Resource):
+            def get(self):
+                flask_restful.abort(400, message="bad")
+
+        api.add_resource(Fail, '/fail')
+        client = app.test_client()
+
+        # Request XML
+        resp = client.get('/fail', headers={'Accept': 'application/xml'})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('application/xml', resp.content_type)
+
+        # Request JSON (default)
+        resp = client.get('/fail', headers={'Accept': 'application/json'})
+        self.assertEqual(resp.status_code, 400)
+        body = json.loads(resp.data.decode())
+        self.assertEqual(body['code'], 400)
+
+    def test_error_response_formatter_set_at_instance_level(self):
+        """Formatter can be assigned after construction via instance attribute."""
+        def envelope(data, code, headers):
+            return {'wrapped': True, 'data': data, 'code': code}
+
+        app = Flask(__name__)
+        api = flask_restful.Api(app)
+        api.error_response_formatter = envelope
+
+        with app.test_request_context("/foo"):
+            resp = api.handle_error(BadRequest())
+            self.assertEqual(resp.status_code, 400)
+            body = json.loads(resp.data.decode())
+            self.assertTrue(body['wrapped'])
+            self.assertEqual(body['code'], 400)
+
 
 if __name__ == '__main__':
     unittest.main()

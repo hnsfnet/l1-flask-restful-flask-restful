@@ -96,13 +96,21 @@ class Api(object):
     :param errors: A dictionary to define a custom response for each
         exception or error raised during a request
     :type errors: dict
+    :param error_response_formatter: An optional callable to customize the
+        error response payload. It receives ``(data, code, headers)`` and
+        must return a new ``data`` dict (or any serializable object).
+        The returned data is then passed through the normal media-type
+        negotiation / ``representations`` pipeline. When ``None`` (the
+        default), the existing behavior is preserved.
+    :type error_response_formatter: callable
 
     """
 
     def __init__(self, app=None, prefix='',
                  default_mediatype='application/json', decorators=None,
                  catch_all_404s=False, serve_challenge_on_401=False,
-                 url_part_order='bae', errors=None):
+                 url_part_order='bae', errors=None,
+                 error_response_formatter=None):
         self.representations = OrderedDict(DEFAULT_REPRESENTATIONS)
         self.urls = {}
         self.prefix = prefix
@@ -112,6 +120,7 @@ class Api(object):
         self.serve_challenge_on_401 = serve_challenge_on_401
         self.url_part_order = url_part_order
         self.errors = errors or {}
+        self.error_response_formatter = error_response_formatter
         self.blueprint_setup = None
         self.endpoints = set()
         self.resources = []
@@ -350,6 +359,9 @@ class Api(object):
             custom_data = self.errors.get(error_cls_name, {})
             code = custom_data.get('status', 500)
             data.update(custom_data)
+
+        if self.error_response_formatter is not None:
+            data = self.error_response_formatter(data, code, headers)
 
         if code == 406 and self.default_mediatype is None:
             # if we are handling NotAcceptable (406), make sure that

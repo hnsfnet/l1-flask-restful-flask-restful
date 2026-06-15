@@ -1,4 +1,5 @@
 import unittest
+import json
 from flask import Flask, Blueprint, request
 try:
     from mock import Mock
@@ -186,6 +187,74 @@ class APIWithBlueprintTestCase(unittest.TestCase):
             assert_false(api._has_fr_route())
         with app.test_request_context('/blueprint/bye'):
             assert_true(api._has_fr_route())
+
+    def test_error_response_formatter_on_blueprint(self):
+        """Formatter works when Api is mounted on a Blueprint."""
+        def envelope(data, code, headers):
+            return {'error': data, 'code': code, 'success': False}
+
+        blueprint = Blueprint('test', __name__)
+        api = flask_restful.Api(blueprint, error_response_formatter=envelope)
+        api.add_resource(GoodbyeWorld(400), '/fail', endpoint="fail")
+        app = Flask(__name__)
+        app.register_blueprint(blueprint, url_prefix='/bp')
+
+        client = app.test_client()
+        resp = client.get('/bp/fail')
+        self.assertEqual(resp.status_code, 400)
+        body = json.loads(resp.data.decode())
+        self.assertFalse(body['success'])
+        self.assertEqual(body['code'], 400)
+        self.assertIn('message', body['error'])
+
+    def test_error_response_formatter_blueprint_does_not_affect_non_blueprint_routes(self):
+        """Formatter on a blueprint Api does not affect plain Flask routes."""
+        def envelope(data, code, headers):
+            return {'error': data, 'code': code}
+
+        blueprint = Blueprint('test', __name__)
+        api = flask_restful.Api(blueprint, error_response_formatter=envelope)
+        api.add_resource(HelloWorld(), '/hi', endpoint="hello")
+        app = Flask(__name__)
+        app.register_blueprint(blueprint, url_prefix='/bp')
+
+        @app.route('/plain-404')
+        def plain():
+            flask.abort(404)
+
+        client = app.test_client()
+
+        # Blueprint route with formatter
+        resp = client.get('/bp/hi', method='DELETE')
+        self.assertEqual(resp.content_type, 'application/json')
+
+        # Non-blueprint 404 should use Flask's default handler, not the formatter
+        resp = client.get('/nonexistent')
+        self.assertEqual(resp.status_code, 404)
+        content_type, _, _ = resp.headers['Content-Type'].partition(';')
+        self.assertEqual('text/html', content_type)
+
+    def test_error_response_formatter_blueprint_500(self):
+        """Formatter handles 500 errors in blueprint context."""
+        def envelope(data, code, headers):
+            return {'error': data, 'code': code}
+
+        class BrokenResource(flask_restful.Resource):
+            def get(self):
+                raise RuntimeError("something broke")
+
+        blueprint = Blueprint('test', __name__)
+        api = flask_restful.Api(blueprint, error_response_formatter=envelope)
+        api.add_resource(BrokenResource, '/broken', endpoint="broken")
+        app = Flask(__name__)
+        app.register_blueprint(blueprint, url_prefix='/bp')
+
+        client = app.test_client()
+        resp = client.get('/bp/broken')
+        self.assertEqual(resp.status_code, 500)
+        body = json.loads(resp.data.decode())
+        self.assertEqual(body['code'], 500)
+        self.assertIn('message', body['error'])
 
 
 if __name__ == '__main__':
