@@ -335,10 +335,90 @@ class RequestParser(object):
             flask_restful.abort(http_error_code, message=errors)
 
         if strict and req.unparsed_arguments:
-            raise exceptions.BadRequest('Unknown arguments: %s'
-                                        % ', '.join(req.unparsed_arguments.keys()))
+            unknown_by_location = self._collect_unknown_arguments(req)
+            error_msg = self._format_unknown_args_error(unknown_by_location)
+            flask_restful.abort(http_error_code, message=error_msg)
 
         return namespace
+
+    def _probe_location(self, req, location, name):
+        """Check if parameter *name* exists at the given *location* on *req*.
+
+        Returns True/False.  Gracefully degrades when the location attribute
+        is missing or not dict-like (e.g. ``request.json`` returning a list).
+        """
+        value = getattr(req, location, None)
+        if callable(value):
+            value = value()
+        if value is None:
+            return False
+        if hasattr(value, '__contains__'):
+            return name in value
+        return False
+
+    def _format_unknown_args_error(self, unknown_by_location):
+        """Build a human-readable error string from grouped unknown arguments.
+
+        :param unknown_by_location:
+            ``[(location_name, [param_name, ...]), ...]`` ordered by location.
+        :returns: A multi-line string listing every unknown parameter together
+            with the friendly name of the location it was found in.
+        """
+        lines = []
+        for location, names in unknown_by_location:
+            friendly = _friendly_location.get(location, location)
+            for name in names:
+                lines.append(
+                    u"'{0}' (in {1})".format(six.text_type(name), friendly)
+                )
+        return u"Unknown arguments: " + u",\n".join(lines)
+
+    def _collect_unknown_arguments(self, req):
+        """Collect unknown arguments grouped by their request location.
+
+        Uses the same merged source that the existing parsing logic relies on
+        (``req.unparsed_arguments``), then probes individual request attributes
+        to determine which location each leftover parameter belongs to.
+        Locations that are supersets of other locations (e.g. ``values``
+        contains both ``args`` and ``form``) are handled so that a parameter
+        is only attributed to the most specific location.
+        """
+        unknown_keys = list(req.unparsed_arguments.keys())
+        if not unknown_keys:
+            return []
+
+        # Determine the set of locations the default source inspects.
+        dummy = self.argument_class('')
+        locations = ([dummy.location]
+                     if isinstance(dummy.location, six.string_types)
+                     else list(dummy.location))
+
+        by_location = {}
+        # Locations whose contents are a union of other locations.  If a
+        # parameter is also found in a more specific location we skip the
+        # superset entry to avoid double-counting.
+        _superset_locations = {'values'}
+
+        for location in locations:
+            found = []
+            for name in list(unknown_keys):
+                if not self._probe_location(req, location, name):
+                    continue
+                if location in _superset_locations:
+                    other_locs = [l for l in locations
+                                  if l != location and l not in _superset_locations]
+                    if any(self._probe_location(req, ol, name) for ol in other_locs):
+                        continue
+                found.append(name)
+                unknown_keys.remove(name)
+            if found:
+                by_location[location] = found
+
+        # Any remaining keys whose location could not be determined.
+        if unknown_keys:
+            by_location.setdefault('unknown', []).extend(unknown_keys)
+
+        return list(by_location.items())
 
     def copy(self):
         """ Creates a copy of this RequestParser with the same set of arguments """

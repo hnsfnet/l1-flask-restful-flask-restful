@@ -845,6 +845,189 @@ class ReqParseTestCase(unittest.TestCase):
         parser.add_argument('foo', type=int)
         self.assertRaises(exceptions.BadRequest, parser.parse_args, req, strict=True)
 
+    def test_strict_parsing_unknown_single_source_query(self):
+        """Unknown arguments from query string are reported with location info."""
+        app = Flask(__name__)
+        with app.app_context():
+            req = Request.from_values("/bubble?unknown1=val1&unknown2=val2")
+            parser = RequestParser()
+            try:
+                parser.parse_args(req, strict=True)
+                self.fail("Expected BadRequest")
+            except exceptions.BadRequest as e:
+                message = e.data['message']
+                self.assertIn('Unknown arguments:', message)
+                self.assertIn("'unknown1'", message)
+                self.assertIn("'unknown2'", message)
+                self.assertIn('the query string', message)
+
+    def test_strict_parsing_unknown_json_source(self):
+        """Unknown arguments from JSON body are reported with JSON location."""
+        app = Flask(__name__)
+        with app.app_context():
+            parser = RequestParser()
+            with app.test_request_context(
+                    '/bubble', method='post',
+                    data=json.dumps({'unknown_json': 'val'}),
+                    content_type='application/json'):
+                try:
+                    parser.parse_args(strict=True)
+                    self.fail("Expected BadRequest")
+                except exceptions.BadRequest as e:
+                    message = e.data['message']
+                    self.assertIn("'unknown_json'", message)
+                    self.assertIn('the JSON body', message)
+
+    def test_strict_parsing_unknown_mixed_sources(self):
+        """Unknown arguments from query string AND JSON body show both locations."""
+        app = Flask(__name__)
+        with app.app_context():
+            parser = RequestParser()
+            with app.test_request_context(
+                    '/bubble?extra_q=qval', method='post',
+                    data=json.dumps({'extra_j': 'jval'}),
+                    content_type='application/json'):
+                try:
+                    parser.parse_args(strict=True)
+                    self.fail("Expected BadRequest")
+                except exceptions.BadRequest as e:
+                    message = e.data['message']
+                    self.assertIn("'extra_q'", message)
+                    self.assertIn("'extra_j'", message)
+                    self.assertIn('the query string', message)
+                    self.assertIn('the JSON body', message)
+
+    def test_strict_parsing_completely_unknown(self):
+        """When parser has no declared arguments, all request params are unknown."""
+        app = Flask(__name__)
+        with app.app_context():
+            req = Request.from_values("/bubble?foo=bar&baz=qux")
+            parser = RequestParser()
+            try:
+                parser.parse_args(req, strict=True)
+                self.fail("Expected BadRequest")
+            except exceptions.BadRequest as e:
+                message = e.data['message']
+                self.assertIn('Unknown arguments:', message)
+                self.assertIn("'foo'", message)
+                self.assertIn("'baz'", message)
+
+    def test_strict_parsing_partial_hit_error_detail(self):
+        """Partial hit: declared args parsed, unknown args reported with location."""
+        app = Flask(__name__)
+        with app.app_context():
+            req = Request.from_values("/bubble?foo=1&bar=bees&n=22")
+            parser = RequestParser()
+            parser.add_argument('foo', type=int)
+            try:
+                parser.parse_args(req, strict=True)
+                self.fail("Expected BadRequest")
+            except exceptions.BadRequest as e:
+                message = e.data['message']
+                self.assertIn("'bar'", message)
+                self.assertIn("'n'", message)
+                self.assertNotIn("'foo'", message)
+
+    def test_strict_false_unaffected(self):
+        """strict=False (default) silently ignores unknown arguments."""
+        req = Request.from_values("/bubble?foo=1&unknown=mystery")
+        parser = RequestParser()
+        parser.add_argument('foo', type=int)
+        args = parser.parse_args(req, strict=False)
+        self.assertEqual(args['foo'], 1)
+        self.assertNotIn('unknown', args)
+
+    def test_strict_parsing_all_declared_no_error(self):
+        """All declared arguments parsed, no unknown args, no error in strict mode."""
+        req = Request.from_values("/bubble?foo=1&bar=baz")
+        parser = RequestParser()
+        parser.add_argument('foo', type=int)
+        parser.add_argument('bar')
+        args = parser.parse_args(req, strict=True)
+        self.assertEqual(args['foo'], 1)
+        self.assertEqual(args['bar'], 'baz')
+
+    def test_strict_parsing_uses_http_error_code(self):
+        """Strict mode respects the http_error_code parameter."""
+        app = Flask(__name__)
+        with app.app_context():
+            req = Request.from_values("/bubble?unknown=val")
+            parser = RequestParser()
+            try:
+                parser.parse_args(req, strict=True, http_error_code=422)
+                self.fail("Expected HTTPException")
+            except exceptions.HTTPException as e:
+                self.assertEqual(e.code, 422)
+
+    def test_strict_parsing_does_not_break_type_conversion(self):
+        """Type conversion on declared args still works correctly in strict mode."""
+        req = Request.from_values("/bubble?count=42&extra=foo")
+        parser = RequestParser()
+        parser.add_argument('count', type=int)
+        app = Flask(__name__)
+        with app.app_context():
+            try:
+                parser.parse_args(req, strict=True)
+                self.fail("Expected BadRequest")
+            except exceptions.BadRequest as e:
+                message = e.data['message']
+                self.assertIn("'extra'", message)
+
+    def test_strict_parsing_does_not_break_choices(self):
+        """Choices validation on declared args is unaffected by strict mode."""
+        app = Flask(__name__)
+        with app.app_context():
+            req = Request.from_values("/bubble?foo=invalid")
+            parser = RequestParser()
+            parser.add_argument('foo', choices=['valid1', 'valid2'])
+            try:
+                parser.parse_args(req, strict=True)
+                self.fail("Expected BadRequest")
+            except exceptions.BadRequest as e:
+                message = e.data['message']
+                # Should be a choices error, not an unknown-args error
+                self.assertIn('foo', message)
+                self.assertNotIn('Unknown arguments:', message)
+
+    def test_strict_parsing_does_not_break_bundle_errors(self):
+        """bundle_errors aggregation still works in strict mode."""
+        app = Flask(__name__)
+        with app.app_context():
+            req = Request.from_values("/bubble")
+            parser = RequestParser(bundle_errors=True)
+            parser.add_argument('foo', required=True, location='values')
+            parser.add_argument('bar', required=True, location='values')
+            try:
+                parser.parse_args(req, strict=True)
+                self.fail("Expected BadRequest")
+            except exceptions.BadRequest as e:
+                message = e.data['message']
+                # Should contain bundled required-field errors
+                self.assertIn('foo', message)
+                self.assertIn('bar', message)
+
+    def test_strict_parsing_does_not_break_store_missing(self):
+        """store_missing=False still excludes missing args in strict mode."""
+        req = Request.from_values("/bubble")
+        parser = RequestParser()
+        parser.add_argument('foo', store_missing=False)
+        args = parser.parse_args(req, strict=True)
+        self.assertNotIn('foo', args)
+
+    def test_strict_parsing_error_format_has_location_info(self):
+        """Error message includes parenthetical location for each unknown arg."""
+        app = Flask(__name__)
+        with app.app_context():
+            req = Request.from_values("/bubble?mystery=val")
+            parser = RequestParser()
+            try:
+                parser.parse_args(req, strict=True)
+                self.fail("Expected BadRequest")
+            except exceptions.BadRequest as e:
+                message = e.data['message']
+                # Check the format: 'name' (in location)
+                self.assertRegex(message, r"'mystery' \(in .+\)")
+
     def test_trim_argument(self):
         req = Request.from_values("/bubble?foo= 1 &bar=bees&n=22")
         parser = RequestParser()
