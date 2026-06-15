@@ -349,12 +349,19 @@ class RequestParser(object):
         return parser_copy
 
     def replace_argument(self, name, *args, **kwargs):
-        """ Replace the argument matching the given name with a new version. """
-        new_arg = self.argument_class(name, *args, **kwargs)
-        for index, arg in enumerate(self.args[:]):
+        """Replace the argument matching the given name with a new version.
+
+        Accepts either a single instance of Argument or arguments to be passed
+        into :class:`Argument`'s constructor. The replacement preserves the
+        original argument's position in the parser.
+        """
+        if isinstance(name, self.argument_class):
+            new_arg = name
+        else:
+            new_arg = self.argument_class(name, *args, **kwargs)
+        for index, arg in enumerate(self.args):
             if new_arg.name == arg.name:
-                del self.args[index]
-                self.args.append(new_arg)
+                self.args[index] = new_arg
                 break
         return self
 
@@ -365,3 +372,61 @@ class RequestParser(object):
                 del self.args[index]
                 break
         return self
+
+    def derive(self, add=None, replace=None, remove=None):
+        """Create a new parser derived from this one, with modifications applied.
+
+        Returns a deep copy of this parser with the specified arguments removed,
+        replaced, or added. The original parser is never modified.
+
+        Operations are applied in the order: remove, replace, add.
+
+        Each parameter accepts a list of items::
+
+            base = reqparse.RequestParser()
+            base.add_argument('page', type=int, default=1)
+            base.add_argument('per_page', type=int, default=20)
+            base.add_argument('sort', type=str, default='id')
+
+            # Declarative derivation
+            list_parser = base.derive(
+                add=[('q', {'type': str})],
+                replace=[('per_page', {'type': int, 'default': 50})],
+            )
+
+            # Chain-style derivation
+            admin_parser = (base.derive(remove=['sort'])
+                .add_argument('role', type=str)
+                .replace_argument('per_page', type=int, default=100))
+
+        :param add: Arguments to add. A list where each item is an
+            :class:`Argument` instance or a ``(name, kwargs_dict)`` tuple.
+        :param replace: Arguments to replace. A list where each item is an
+            :class:`Argument` instance or a ``(name, kwargs_dict)`` tuple.
+            The matched argument keeps its original position.
+        :param remove: Argument names to remove. A list of name strings.
+        :returns: A new :class:`RequestParser` (supports further chaining).
+        """
+        parser = self.copy()
+
+        if remove:
+            for name in remove:
+                parser.remove_argument(name)
+
+        if replace:
+            for item in replace:
+                if isinstance(item, self.argument_class):
+                    parser.replace_argument(item)
+                else:
+                    name, kwargs = item
+                    parser.replace_argument(name, **kwargs)
+
+        if add:
+            for item in add:
+                if isinstance(item, self.argument_class):
+                    parser.add_argument(item)
+                else:
+                    name, kwargs = item
+                    parser.add_argument(name, **kwargs)
+
+        return parser

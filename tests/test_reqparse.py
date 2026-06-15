@@ -951,5 +951,224 @@ class ReqParseTestCase(unittest.TestCase):
             self.assertTrue("choices: [1, 2, 3, '...', 6]" in str(arg))
 
 
+    def test_replace_argument_preserves_order(self):
+        parser = RequestParser()
+        parser.add_argument('a')
+        parser.add_argument('b', type=int)
+        parser.add_argument('c')
+
+        parser.replace_argument('b', type=str, default='replaced')
+
+        arg_names = [arg.name for arg in parser.args]
+        self.assertEqual(arg_names, ['a', 'b', 'c'])
+        self.assertEqual(parser.args[1].default, 'replaced')
+
+    def test_replace_argument_with_argument_instance(self):
+        req = Request.from_values("/bubble?foo=42")
+        parser = RequestParser()
+        parser.add_argument('foo', location='args')
+        parser.replace_argument(Argument('foo', type=int, location='args'))
+        args = parser.parse_args(req)
+        self.assertEqual(args['foo'], 42)
+
+    def test_derive_no_args_is_copy(self):
+        parser = RequestParser(trim=True, bundle_errors=True)
+        parser.add_argument('foo', type=int, default=1)
+        parser.add_argument('bar')
+
+        derived = parser.derive()
+
+        self.assertEqual(len(derived.args), 2)
+        self.assertEqual(derived.trim, True)
+        self.assertEqual(derived.bundle_errors, True)
+        # Must be a separate object
+        self.assertIsNot(derived, parser)
+        self.assertIsNot(derived.args, parser.args)
+        # Args are deep copies
+        for orig, copy in zip(parser.args, derived.args):
+            self.assertIsNot(orig, copy)
+            self.assertEqual(orig.name, copy.name)
+
+    def test_derive_with_add(self):
+        parser = RequestParser()
+        parser.add_argument('page', type=int, default=1)
+
+        derived = parser.derive(add=[
+            ('q', {'type': str}),
+        ])
+
+        self.assertEqual(len(derived.args), 2)
+        self.assertEqual(derived.args[1].name, 'q')
+        # Base parser unchanged
+        self.assertEqual(len(parser.args), 1)
+
+    def test_derive_with_add_argument_instance(self):
+        parser = RequestParser()
+        parser.add_argument('page', type=int, default=1)
+
+        derived = parser.derive(add=[Argument('q', type=str)])
+
+        self.assertEqual(len(derived.args), 2)
+        self.assertEqual(derived.args[1].name, 'q')
+
+    def test_derive_with_replace(self):
+        parser = RequestParser()
+        parser.add_argument('page', type=int, default=1)
+        parser.add_argument('per_page', type=int, default=20)
+
+        derived = parser.derive(replace=[
+            ('per_page', {'type': int, 'default': 50}),
+        ])
+
+        # Derived parser has updated default
+        self.assertEqual(derived.args[1].default, 50)
+        # Base parser unchanged
+        self.assertEqual(parser.args[1].default, 20)
+        # Order preserved
+        self.assertEqual([a.name for a in derived.args], ['page', 'per_page'])
+
+    def test_derive_with_replace_argument_instance(self):
+        parser = RequestParser()
+        parser.add_argument('page', type=int, default=1)
+
+        derived = parser.derive(replace=[Argument('page', type=int, default=5)])
+
+        self.assertEqual(derived.args[0].default, 5)
+        self.assertEqual(parser.args[0].default, 1)
+
+    def test_derive_with_remove(self):
+        parser = RequestParser()
+        parser.add_argument('page', type=int, default=1)
+        parser.add_argument('per_page', type=int, default=20)
+        parser.add_argument('sort', type=str)
+
+        derived = parser.derive(remove=['sort', 'page'])
+
+        self.assertEqual(len(derived.args), 1)
+        self.assertEqual(derived.args[0].name, 'per_page')
+        # Base parser unchanged
+        self.assertEqual(len(parser.args), 3)
+
+    def test_derive_combined(self):
+        parser = RequestParser()
+        parser.add_argument('page', type=int, default=1)
+        parser.add_argument('per_page', type=int, default=20)
+        parser.add_argument('sort', type=str, default='id')
+
+        derived = parser.derive(
+            remove=['sort'],
+            replace=[('per_page', {'type': int, 'default': 50})],
+            add=[('q', {'type': str})],
+        )
+
+        arg_names = [a.name for a in derived.args]
+        self.assertEqual(arg_names, ['page', 'per_page', 'q'])
+        self.assertEqual(derived.args[1].default, 50)
+        # Base unchanged
+        self.assertEqual(len(parser.args), 3)
+        self.assertEqual(parser.args[1].default, 20)
+
+    def test_derive_base_isolation(self):
+        """Mutations on derived parser must not affect the base parser."""
+        base = RequestParser()
+        base.add_argument('foo', type=int)
+        base.add_argument('bar')
+
+        child = base.derive()
+        child.add_argument('extra')
+        child.remove_argument('foo')
+
+        # Base still has its original args
+        self.assertEqual([a.name for a in base.args], ['foo', 'bar'])
+
+    def test_derive_chaining(self):
+        """derive() result supports further chaining with add/replace/remove."""
+        base = RequestParser()
+        base.add_argument('page', type=int, default=1)
+        base.add_argument('per_page', type=int, default=20)
+
+        admin_parser = (base.derive(remove=['page'])
+            .add_argument('role', type=str)
+            .replace_argument('per_page', type=int, default=100))
+
+        arg_names = [a.name for a in admin_parser.args]
+        self.assertEqual(arg_names, ['per_page', 'role'])
+        self.assertEqual(admin_parser.args[0].default, 100)
+
+    def test_derive_multiple_from_same_base(self):
+        """Multiple independent parsers derived from the same base."""
+        base = RequestParser()
+        base.add_argument('page', type=int, default=1)
+        base.add_argument('per_page', type=int, default=20)
+
+        list_parser = base.derive(add=[('q', {'type': str})])
+        admin_parser = base.derive(
+            replace=[('per_page', {'type': int, 'default': 100})],
+            add=[('role', {'type': str})],
+        )
+        detail_parser = base.derive(remove=['page', 'per_page'])
+
+        self.assertEqual([a.name for a in list_parser.args], ['page', 'per_page', 'q'])
+        self.assertEqual([a.name for a in admin_parser.args], ['page', 'per_page', 'role'])
+        self.assertEqual(admin_parser.args[1].default, 100)
+        self.assertEqual([a.name for a in detail_parser.args], [])
+        # Base is untouched
+        self.assertEqual([a.name for a in base.args], ['page', 'per_page'])
+        self.assertEqual(base.args[1].default, 20)
+
+    def test_derive_preserves_parser_config(self):
+        base = RequestParser(trim=True, bundle_errors=True,
+                             namespace_class=dict)
+        base.add_argument('foo')
+
+        derived = base.derive(add=[('bar', {'type': int})])
+
+        self.assertEqual(derived.trim, True)
+        self.assertEqual(derived.bundle_errors, True)
+        self.assertEqual(derived.namespace_class, dict)
+        self.assertEqual(derived.argument_class, Argument)
+
+    def test_derive_parsing_works(self):
+        """End-to-end: derived parser actually parses requests correctly."""
+        base = RequestParser()
+        base.add_argument('page', type=int, default=1, location='args')
+        base.add_argument('per_page', type=int, default=20, location='args')
+
+        derived = base.derive(
+            replace=[('per_page', {'type': int, 'default': 50, 'location': 'args'})],
+            add=[('q', {'type': str, 'location': 'args'})],
+        )
+
+        req = Request.from_values("/items?page=3&q=hello")
+        args = derived.parse_args(req)
+        self.assertEqual(args['page'], 3)
+        self.assertEqual(args['per_page'], 50)  # default used
+        self.assertEqual(args['q'], 'hello')
+
+    def test_derive_trim_inherited(self):
+        """trim=True on base propagates to args added via derive."""
+        base = RequestParser(trim=True)
+        base.add_argument('foo', location='args')
+
+        derived = base.derive(add=[('bar', {'location': 'args'})])
+
+        req = Request.from_values("/bubble?foo= x &bar= y ")
+        args = derived.parse_args(req)
+        self.assertEqual(args['foo'], 'x')
+        self.assertEqual(args['bar'], 'y')
+
+    def test_derive_then_derive(self):
+        """Chained derive from a derived parser."""
+        base = RequestParser()
+        base.add_argument('a')
+
+        level1 = base.derive(add=[('b', {})])
+        level2 = level1.derive(add=[('c', {})], remove=['a'])
+
+        self.assertEqual([a.name for a in base.args], ['a'])
+        self.assertEqual([a.name for a in level1.args], ['a', 'b'])
+        self.assertEqual([a.name for a in level2.args], ['b', 'c'])
+
+
 if __name__ == '__main__':
     unittest.main()
