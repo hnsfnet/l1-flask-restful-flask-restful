@@ -502,6 +502,48 @@ class Api(object):
             endpoint = '{0}.{1}'.format(self.blueprint.name, endpoint)
         return url_for(endpoint, **values)
 
+    def _select_mediatype(self, fallback_mediatype=None):
+        """Determine the best media type for the current request via content
+        negotiation.
+
+        Returns ``(mediatype, detail)`` where *detail* is a human-readable
+        string explaining how the choice was made — handy for debugging
+        multi-representation setups.
+
+        :param fallback_mediatype: If given, overrides ``self.default_mediatype``
+            as the fallback when no Accept match is found.
+        :returns: ``(str or None, str)``
+        """
+        default_mediatype = fallback_mediatype or self.default_mediatype
+        available = list(self.representations.keys())
+
+        mediatype = request.accept_mimetypes.best_match(
+            self.representations,
+            default=default_mediatype,
+        )
+
+        if mediatype is None:
+            detail = (
+                "No acceptable media type. "
+                "Requested: {requested}. "
+                "Available: {available}. "
+                "Default: {default}"
+            ).format(
+                requested=request.accept_mimetypes,
+                available=available or '(none)',
+                default=default_mediatype or '(none)',
+            )
+            return None, detail
+
+        if mediatype in self.representations:
+            detail = "matched representation for '{0}'".format(mediatype)
+        elif mediatype == default_mediatype:
+            detail = "using default media type '{0}' (no matching representation)".format(mediatype)
+        else:
+            detail = "selected '{0}'".format(mediatype)
+
+        return mediatype, detail
+
     def make_response(self, data, *args, **kwargs):
         """Looks up the representation transformer for the requested media
         type, invoking the transformer to create a response object. This
@@ -511,23 +553,34 @@ class Api(object):
 
         :param data: Python object containing response data to be transformed
         """
-        default_mediatype = kwargs.pop('fallback_mediatype', None) or self.default_mediatype
-        mediatype = request.accept_mimetypes.best_match(
-            self.representations,
-            default=default_mediatype,
-        )
+        fallback_mediatype = kwargs.pop('fallback_mediatype', None)
+        mediatype, negotiation_detail = self._select_mediatype(fallback_mediatype)
+
         if mediatype is None:
-            raise NotAcceptable()
+            raise NotAcceptable(description=negotiation_detail)
+
         if mediatype in self.representations:
             resp = self.representations[mediatype](data, *args, **kwargs)
             resp.headers['Content-Type'] = mediatype
             return resp
         elif mediatype == 'text/plain':
+            headers = kwargs.pop('headers', {})
             resp = original_flask_make_response(str(data), *args, **kwargs)
+            resp.headers.extend(headers or {})
             resp.headers['Content-Type'] = 'text/plain'
             return resp
         else:
-            raise InternalServerError()
+            raise InternalServerError(
+                description=(
+                    "Media type '{mediatype}' was selected but has no registered "
+                    "representation. Either register a representation for this "
+                    "type or change default_mediatype. "
+                    "Registered representations: {available}"
+                ).format(
+                    mediatype=mediatype,
+                    available=list(self.representations.keys()) or '(none)',
+                )
+            )
 
     def mediatypes(self):
         """Returns a list of requested mediatypes sent in the Accept header"""
